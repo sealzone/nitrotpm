@@ -1,0 +1,22 @@
+# Publishes the crate for a version tag (vX.Y.Z) through crates.io trusted publishing. The
+# tag must match the version in Cargo.toml.
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      id-token: write # crates.io trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag is the crate's version
+        run: test "${GITHUB_REF_NAME#v}" = "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+      - run: cargo test --locked
+      - id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
