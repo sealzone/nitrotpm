@@ -1,6 +1,6 @@
 //! A TPM that answers the commands of the attestation flow as the TPM 2.0 reference
-//! implementation and NitroTPM do, parsed from the bytes: the tests check what goes on the
-//! wire, not the client's own view of it.
+//! implementation and NitroTPM do, parsed from the bytes. That way the tests check what goes
+//! on the wire, not the client's own view of it.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -15,10 +15,10 @@ const NV_INDEX_FIRST: u32 = 0x0100_0000;
 const SESSION_HANDLE: u32 = 0x0200_0000;
 
 pub(crate) struct Index {
-    pub public: Vec<u8>,
-    pub auth: Vec<u8>,
-    pub data: Vec<u8>,
-    pub written: bool,
+    public: Vec<u8>,
+    auth: Vec<u8>,
+    data: Vec<u8>,
+    written: bool,
 }
 
 #[derive(Default)]
@@ -57,7 +57,7 @@ impl FakeTpm {
 }
 
 /// The NSM's answer: a "document" that is the CBOR of the request's fields.
-pub(crate) fn document_from_request(request: &Value) -> Value {
+fn document_from_request(request: &Value) -> Value {
     let mut doc = Vec::new();
     ciborium::into_writer(request, &mut doc).unwrap();
     Value::Map(vec![(
@@ -167,9 +167,8 @@ impl State {
         let code = r.u32();
         self.log.push(code);
         let handles = match code {
-            0x122 | 0x137 | 0x14E | 0x2000_0001 => 2,
+            0x122 | 0x137 | 0x14E | 0x176 | 0x2000_0001 => 2,
             0x12A | 0x169 => 1,
-            0x176 => 2,
             _ => 0,
         };
         let hs: Vec<u32> = (0..handles).map(|_| r.u32()).collect();

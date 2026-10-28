@@ -9,7 +9,7 @@ use crate::Error;
 
 /// The size of a SHA-512 digest: the nonce and authorization value size for a SHA-512
 /// session and index.
-pub(crate) const DIGEST_LEN: usize = 64;
+const DIGEST_LEN: usize = 64;
 
 fn random<const N: usize>() -> Result<[u8; N], Error> {
     let mut b = [0u8; N];

@@ -1,26 +1,28 @@
 //! Retrieve a signed attestation document from an EC2 instance's NitroTPM, in pure Rust.
 //!
-//! The API is that of AWS's [`nitro-tpm-attest`](https://crates.io/crates/nitro-tpm-attest):
+//! The API matches AWS's [`nitro-tpm-attest`](https://crates.io/crates/nitro-tpm-attest).
 //! [`attestation_document`] takes the optional user data, nonce and public key (at most
 //! 1024 bytes each) and returns the document, a COSE_Sign1 over CBOR signed by the Nitro
-//! hypervisor; the device is `/dev/tpm0`, or `TPM_DEVICE`. It talks to the TPM directly
-//! instead of through `libtss2`, so it builds anywhere Rust does, statically included.
+//! hypervisor. The device is `/dev/tpm0`, or the path in `TPM_DEVICE`. The crate talks to
+//! the TPM directly instead of through `libtss2`, so it builds anywhere Rust does, static
+//! musl binaries included.
 //!
 //! The document comes from AWS's vendor command (`0x20000001`), which runs an NSM request
 //! held in an NV index and writes the response back into it:
 //!
 //! 1. `NV_DefineSpace` an 8 KiB index (owner authorization, which is empty on EC2) with a
 //!    random 64-byte authorization value, and `NV_Write` the CBOR request into it.
-//! 2. `StartAuthSession` an HMAC session (SHA-512, unbound and unsalted: the index's
-//!    authorization is random, so it needs no salt), and send the vendor command on the
-//!    index with it.
+//! 2. `StartAuthSession` an unbound, unsalted HMAC session (SHA-512), and send the vendor
+//!    command on the index with it. The session needs no salt because the index's
+//!    authorization is random.
 //! 3. `NV_Read` the CBOR response, then `NV_UndefineSpace` the index and `FlushContext` the
-//!    session, also when a step failed.
+//!    session, even when a step fails.
 //!
 //! Only the raw device takes the vendor command, not the kernel's resource manager
-//! (`/dev/tpmrm0`). The raw device is exclusive: opening it fails with `EBUSY` while another
-//! process (such as `tpm2-abrmd`) holds it. Not every instance type with NitroTPM can attest:
-//! where the TPM refuses an 8 KiB index, the error is [`Error::Unsupported`].
+//! (`/dev/tpmrm0`). Only one process can hold the raw device, so opening it fails with
+//! `EBUSY` while another (such as `tpm2-abrmd`) has it open. Not every instance type with
+//! NitroTPM can attest. Where the TPM refuses an 8 KiB index, the error is
+//! [`Error::Unsupported`].
 
 #![forbid(unsafe_code)]
 
@@ -41,8 +43,8 @@ use wire::{Command, Response};
 /// Why an attestation document could not be retrieved.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// The device does not exist: not an EC2 instance, or its AMI was not registered with
-    /// `--tpm-support v2.0`.
+    /// The device does not exist. Either this is not an EC2 instance, or its AMI was not
+    /// registered with `--tpm-support v2.0`.
     #[error("no TPM at {0}")]
     NoDevice(PathBuf),
     /// The device exists but this process may not open it (it is `root:root 0600` by default).
@@ -57,7 +59,7 @@ pub enum Error {
     NotRawDevice(PathBuf),
     #[error("{0}: {1}")]
     Io(PathBuf, std::io::Error),
-    /// The TPM refused the 8 KiB message buffer: this instance type has NitroTPM but cannot
+    /// The TPM refused the 8 KiB message buffer. This instance type has NitroTPM but cannot
     /// attest.
     #[error("this TPM cannot hold the attestation buffer (TPM error {0:#x}); the instance type cannot attest")]
     Unsupported(u32),
@@ -100,7 +102,7 @@ pub fn device_path() -> PathBuf {
 }
 
 /// Something that runs one TPM command and returns its response.
-pub(crate) trait Transport {
+trait Transport {
     fn transact(&mut self, command: &[u8]) -> Result<Vec<u8>, Error>;
 }
 
@@ -121,10 +123,7 @@ impl Transport for Device {
         self.file.write_all(command).map_err(io)?;
         // The kernel returns the whole response in one read.
         let mut response = vec![0u8; 16 * 1024];
-        let n = self
-            .file
-            .read(&mut response)
-            .map_err(|e| Error::Io(self.path.clone(), e))?;
+        let n = self.file.read(&mut response).map_err(io)?;
         response.truncate(n);
         Ok(response)
     }
@@ -147,7 +146,7 @@ impl Tpm {
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::NotFound => Error::NoDevice(path.clone()),
                 std::io::ErrorKind::PermissionDenied => Error::PermissionDenied(path.clone()),
-                _ if e.raw_os_error() == Some(16) => Error::Busy(path.clone()),
+                std::io::ErrorKind::ResourceBusy => Error::Busy(path.clone()),
                 _ => Error::Io(path.clone(), e),
             })?;
         Ok(Self {
@@ -157,7 +156,7 @@ impl Tpm {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_transport(transport: impl Transport + 'static) -> Self {
+    fn with_transport(transport: impl Transport + 'static) -> Self {
         Self {
             path: "/dev/fake-tpm".into(),
             transport: Box::new(transport),
@@ -191,7 +190,8 @@ impl Tpm {
         nsm::attestation_response(&response)
     }
 
-    /// Steps 1 to 3 on a defined index; the caller undefines it.
+    /// Writes the request into the defined index, sends the vendor command and reads the
+    /// response back; the caller undefines the index.
     fn run(&mut self, index: u32, auth: &[u8], request: &[u8]) -> Result<Vec<u8>, Error> {
         let chunk = self.nv_buffer_max()?;
         for (i, part) in request.chunks(chunk).enumerate() {
@@ -216,13 +216,13 @@ impl Tpm {
         Ok(response)
     }
 
-    fn call(
+    fn call<T>(
         &mut self,
         command: Vec<u8>,
         code: u32,
         handles: usize,
-        f: impl FnOnce(Response<'_>) -> Result<(), Error>,
-    ) -> Result<(), Error> {
+        f: impl FnOnce(Response<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         let bytes = self.transport.transact(&command)?;
         f(Response::parse(&bytes, code, handles)?)
     }
@@ -235,21 +235,19 @@ impl Tpm {
             .u32(wire::PT_NV_BUFFER_MAX)
             .u32(1)
             .build();
-        let mut max = None;
         self.call(command, code, 0, |mut r| {
             let _more = r.u8()?;
-            let bad = || Error::InvalidTpmResponse(code);
             if r.u32()? != wire::CAP_TPM_PROPERTIES
                 || r.u32()? != 1
                 || r.u32()? != wire::PT_NV_BUFFER_MAX
             {
-                return Err(bad());
+                return Err(Error::InvalidTpmResponse(code));
             }
-            max = Some(r.u32()? as usize);
-            Ok(())
-        })?;
-        max.filter(|m| *m > 0)
-            .ok_or(Error::InvalidTpmResponse(code))
+            match r.u32()? {
+                0 => Err(Error::InvalidTpmResponse(code)),
+                max => Ok(max as usize),
+            }
+        })
     }
 
     /// The NV indices in use.
@@ -263,16 +261,15 @@ impl Tpm {
                 .u32(from)
                 .u32(wire::NV_INDEX_LAST - from + 1)
                 .build();
-            let mut more = false;
-            self.call(command, code, 0, |mut r| {
-                more = r.u8()? != 0;
+            let more = self.call(command, code, 0, |mut r| {
+                let more = r.u8()? != 0;
                 if r.u32()? != wire::CAP_HANDLES {
                     return Err(Error::InvalidTpmResponse(code));
                 }
                 for _ in 0..r.u32()? {
                     all.push(r.u32()?);
                 }
-                Ok(())
+                Ok(more)
             })?;
             match all.last() {
                 Some(&last) if more && last < wire::NV_INDEX_LAST => from = last + 1,
@@ -349,11 +346,7 @@ impl Tpm {
             .u16(size)
             .u16(offset)
             .build();
-        let mut data = Vec::new();
-        self.call(command, code, 0, |mut r| {
-            data = r.sized()?.to_vec();
-            Ok(())
-        })?;
+        let data = self.call(command, code, 0, |mut r| Ok(r.sized()?.to_vec()))?;
         if data.len() != size as usize {
             return Err(Error::InvalidTpmResponse(code));
         }
@@ -364,17 +357,15 @@ impl Tpm {
     fn nv_name(&mut self, index: u32) -> Result<Vec<u8>, Error> {
         let code = wire::CC_NV_READ_PUBLIC;
         let command = Command::new(wire::ST_NO_SESSIONS, code).u32(index).build();
-        let mut name = Vec::new();
         self.call(command, code, 0, |mut r| {
             let public = r.sized()?;
-            name = r.sized()?.to_vec();
+            let name = r.sized()?;
             // The TPM's description must be the one defined, written.
             if public != nv_public(index, true) {
                 return Err(Error::InvalidTpmResponse(code));
             }
-            Ok(())
-        })?;
-        Ok(name)
+            Ok(name.to_vec())
+        })
     }
 
     fn start_session(&mut self) -> Result<(u32, Vec<u8>), Error> {
@@ -389,12 +380,9 @@ impl Tpm {
             .u16(wire::ALG_NULL)
             .u16(wire::ALG_SHA512)
             .build();
-        let mut out = None;
         self.call(command, code, 1, |mut r| {
-            out = Some((r.handles[0], r.sized()?.to_vec()));
-            Ok(())
-        })?;
-        out.ok_or(Error::InvalidTpmResponse(code))
+            Ok((r.handles[0], r.sized()?.to_vec()))
+        })
     }
 
     fn nsm_request(
@@ -443,7 +431,7 @@ impl Tpm {
 }
 
 /// `TPMS_NV_PUBLIC` of the message buffer: SHA-512 name, `AUTHREAD | AUTHWRITE`, no policy.
-pub(crate) fn nv_public(index: u32, written: bool) -> Vec<u8> {
+fn nv_public(index: u32, written: bool) -> Vec<u8> {
     let attributes =
         wire::NVA_AUTHREAD | wire::NVA_AUTHWRITE | if written { wire::NVA_WRITTEN } else { 0 };
     let mut p = Vec::with_capacity(14);

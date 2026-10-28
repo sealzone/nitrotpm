@@ -6,13 +6,8 @@ edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/sealzone/nitrotpm"
-readme = "README.md"
 keywords = ["aws", "nitro", "nitrotpm", "attestation", "tpm"]
 categories = ["cryptography", "hardware-support"]
-
-[[bin]]
-name = "nitrotpm"
-path = "src/main.rs"
 
 [dependencies]
 ciborium = "0.2"

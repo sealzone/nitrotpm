@@ -106,6 +106,7 @@ pub(crate) fn password(password: &[u8]) -> Vec<u8> {
 /// A response: its handles, then its parameters (without the parameter size or the
 /// authorization area that a response with sessions has around them).
 pub(crate) struct Response<'a> {
+    command: u32,
     pub handles: Vec<u32>,
     rest: &'a [u8],
 }
@@ -125,17 +126,18 @@ impl<'a> Response<'a> {
             return Err(Error::Tpm { command, code });
         }
         let mut r = Self {
+            command,
             handles: Vec::new(),
             rest: &bytes[10..],
         };
         for _ in 0..handles {
-            let h = r.u32().map_err(|_| bad())?;
+            let h = r.u32()?;
             r.handles.push(h);
         }
         match tag {
             ST_NO_SESSIONS => {}
             ST_SESSIONS => {
-                let params = r.u32().map_err(|_| bad())? as usize;
+                let params = r.u32()? as usize;
                 r.rest = r.rest.get(..params).ok_or_else(bad)?;
             }
             _ => return Err(bad()),
@@ -145,7 +147,7 @@ impl<'a> Response<'a> {
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
         if self.rest.len() < n {
-            return Err(Error::InvalidTpmResponse(0));
+            return Err(Error::InvalidTpmResponse(self.command));
         }
         let (head, tail) = self.rest.split_at(n);
         self.rest = tail;
