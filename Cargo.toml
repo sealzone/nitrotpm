@@ -1,0 +1,22 @@
+[package]
+name = "nitrotpm"
+version = "0.1.0"
+description = "Retrieve a signed attestation document from an EC2 instance's NitroTPM, in pure Rust (no libtss2)"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/sealzone/nitrotpm"
+readme = "README.md"
+keywords = ["aws", "nitro", "nitrotpm", "attestation", "tpm"]
+categories = ["cryptography", "hardware-support"]
+
+[[bin]]
+name = "nitrotpm"
+path = "src/main.rs"
+
+[dependencies]
+ciborium = "0.2"
+getrandom = "0.4"
+hmac = "0.13"
+sha2 = "0.11"
+thiserror = "2"
